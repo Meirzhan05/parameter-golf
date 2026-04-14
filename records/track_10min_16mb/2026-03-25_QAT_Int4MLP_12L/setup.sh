@@ -15,7 +15,8 @@ echo "============================================"
 echo ""
 echo "[1/3] Installing Python dependencies..."
 pip install --upgrade pip -q
-pip install numpy tqdm torch sentencepiece huggingface-hub -q
+pip install numpy tqdm sentencepiece huggingface-hub -q
+pip install torch --index-url https://download.pytorch.org/whl/cu128 -q
 echo "  Done."
 
 # ---------------------------------------------------------------
@@ -37,7 +38,8 @@ fi
 echo ""
 echo "[3/3] Downloading dataset (sp1024)..."
 
-cd /workspace/parameter-golf  # adjust if your repo is elsewhere
+REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$REPO_ROOT"
 python3 data/cached_challenge_fineweb.py --variant sp1024
 
 echo "  Done."
@@ -60,7 +62,7 @@ print(f"GPUs         : {torch.cuda.device_count()}")
 
 for i in range(torch.cuda.device_count()):
     p = torch.cuda.get_device_properties(i)
-    print(f"  GPU {i}      : {p.name} ({p.total_mem // 1024**3}GB)")
+    print(f"  GPU {i}      : {p.name} ({p.total_memory // 1024**3}GB)")
 
 try:
     from flash_attn_interface import flash_attn_func
