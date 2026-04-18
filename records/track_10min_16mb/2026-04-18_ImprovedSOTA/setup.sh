@@ -19,7 +19,15 @@ echo ""
 echo "[1/3] Installing Python dependencies..."
 pip install --upgrade pip -q
 pip install numpy tqdm sentencepiece huggingface-hub brotli -q
-pip install torch --index-url https://download.pytorch.org/whl/cu128 -q
+
+# Ensure torch 2.9.1+cu128 (required for flash_attn_3 wheel)
+TORCH_VER=$(python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
+if [[ "$TORCH_VER" != *"2.9"*"+cu128"* ]]; then
+    echo "  Upgrading torch to 2.9.1+cu128 (current: $TORCH_VER)..."
+    pip install torch --index-url https://download.pytorch.org/whl/cu128 --no-cache-dir --force-reinstall -q
+else
+    echo "  torch $TORCH_VER already OK."
+fi
 echo "  Done."
 
 # ---------------------------------------------------------------
@@ -28,10 +36,10 @@ echo "  Done."
 echo ""
 echo "[2/3] Installing Flash Attention 3..."
 
-if python3 -c "from flash_attn_interface import flash_attn_func" 2>/dev/null; then
-    echo "  Already installed — skipping."
+if python3 -c "from flash_attn_interface import flash_attn_func; print('ok')" 2>/dev/null | grep -q ok; then
+    echo "  Already installed and working — skipping."
 else
-    pip install flash_attn_3 --no-deps --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch291/
+    pip install flash_attn_3 --no-deps --force-reinstall --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch291/
     echo "  Installed."
 fi
 
