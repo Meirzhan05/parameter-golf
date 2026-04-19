@@ -380,19 +380,13 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, dim, mlp_mult):
         super().__init__()
-        # SwiGLU: 3 matrices instead of 2, so reduce hidden dim to keep param count ~equal
-        # Original: 2 * dim * hidden = 2 * dim * (4*dim) = 8*dim^2
-        # SwiGLU:   3 * dim * hidden = 8*dim^2  =>  hidden = 8*dim/3 ≈ 2.67*dim
-        hidden = int(mlp_mult * dim * 2 / 3)
-        # Round to multiple of 64 for efficiency
-        hidden = ((hidden + 63) // 64) * 64
-        self.gate = CastedLinear(dim, hidden, bias=False)
-        self.up = CastedLinear(dim, hidden, bias=False)
+        hidden = int(mlp_mult * dim)
+        self.fc = CastedLinear(dim, hidden, bias=False)
         self.proj = CastedLinear(hidden, dim, bias=False)
         self.proj._zero_init = True
 
     def forward(self, x):
-        return self.proj(F.silu(self.gate(x)) * self.up(x))
+        return self.proj(F.leaky_relu(self.fc(x), negative_slope=0.5).square())
 
 
 class Block(nn.Module):
