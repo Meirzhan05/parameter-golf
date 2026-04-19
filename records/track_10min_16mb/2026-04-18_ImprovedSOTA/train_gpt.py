@@ -73,7 +73,7 @@ class Hyperparameters:
     etlb_lr = float(os.environ.get("ETLB_LR", 0.05))
     etlb_steps = int(os.environ.get("ETLB_STEPS", 5))
     etlb_clip = float(os.environ.get("ETLB_CLIP", 3.0))
-    stack_enabled = bool(int(os.environ.get("STACK_ENABLED", "1")))
+    stack_enabled = bool(int(os.environ.get("STACK_ENABLED", "0")))
     stack_phase1_frac = float(os.environ.get("STACK_PHASE1_FRAC", 0.25))
     stack_phase1_layers = int(os.environ.get("STACK_PHASE1_LAYERS", 6))
     compressor = os.environ.get("COMPRESSOR", "brotli")
