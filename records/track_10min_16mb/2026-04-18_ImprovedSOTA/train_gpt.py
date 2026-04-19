@@ -73,6 +73,9 @@ class Hyperparameters:
     etlb_lr = float(os.environ.get("ETLB_LR", 0.05))
     etlb_steps = int(os.environ.get("ETLB_STEPS", 5))
     etlb_clip = float(os.environ.get("ETLB_CLIP", 3.0))
+    stack_enabled = bool(int(os.environ.get("STACK_ENABLED", "1")))
+    stack_phase1_frac = float(os.environ.get("STACK_PHASE1_FRAC", 0.40))
+    stack_phase1_layers = int(os.environ.get("STACK_PHASE1_LAYERS", 6))
     compressor = os.environ.get("COMPRESSOR", "brotli")
     gptq_calibration_batches = int(os.environ.get("GPTQ_CALIBRATION_BATCHES", 64))
     gptq_reserve_seconds = float(os.environ.get("GPTQ_RESERVE_SECONDS", 12.0))
@@ -1173,7 +1176,247 @@ def timed_eval(label, fn, *args, **kwargs):
     return val_loss, val_bpb
 
 
+def stack_weights(shallow_model, full_model, shallow_layers, full_layers):
+    """Copy weights from a shallow model into a full-depth model."""
+    sd_shallow = shallow_model.state_dict()
+    sd_full = full_model.state_dict()
+    for key in sd_full:
+        if key.startswith("blocks."):
+            parts = key.split(".", 2)
+            layer_idx = int(parts[1])
+            rest = parts[2]
+            if layer_idx < shallow_layers:
+                src_key = f"blocks.{layer_idx}.{rest}"
+                if src_key in sd_shallow:
+                    sd_full[key].copy_(sd_shallow[src_key])
+            else:
+                src_idx = (layer_idx - shallow_layers) % shallow_layers
+                src_key = f"blocks.{src_idx}.{rest}"
+                if src_key in sd_shallow:
+                    sd_full[key].copy_(sd_shallow[src_key])
+                    if "proj.weight" in rest or "mlp.proj.weight" in rest:
+                        sd_full[key].mul_(0.5)
+        elif key in ("skip_weights", "skip_gates"):
+            pass  # reinitialize (different shape)
+        elif key in sd_shallow:
+            sd_full[key].copy_(sd_shallow[key])
+    full_model.load_state_dict(sd_full)
+    log(f"stack:copied {shallow_layers}L weights into {full_layers}L model")
+
+
+def train_model_stacked(h, device, val_data):
+    """Two-phase progressive stacking: train shallow, then expand to full depth."""
+    import copy as _copy
+
+    total_wall_ms = 1e3 * h.max_wallclock_seconds - h.gptq_reserve_seconds * 1e3
+    phase1_wall_ms = total_wall_ms * h.stack_phase1_frac
+    phase2_wall_ms = total_wall_ms - phase1_wall_ms
+    log(f"stack:phase1={phase1_wall_ms:.0f}ms ({h.stack_phase1_layers}L) phase2={phase2_wall_ms:.0f}ms ({h.num_layers}L)")
+
+    # === PHASE 1: Train shallow model ===
+    h1 = _copy.copy(h)
+    h1.num_layers = h.stack_phase1_layers
+    h1.num_loops = 0
+    h1.skip_gates_enabled = False
+    h1.xsa_last_n = h1.num_layers
+    h1.parallel_residual_start = max(h.parallel_residual_start, h1.num_layers)  # disable for phase1
+
+    base_model_p1 = GPT(h1).to(device).bfloat16()
+    restore_fp32_params(base_model_p1)
+    compiled_p1 = torch.compile(base_model_p1, dynamic=False, fullgraph=True)
+    model_p1 = DDP(compiled_p1, device_ids=[h.local_rank], broadcast_buffers=False) if h.distributed else compiled_p1
+    log(f"stack:phase1 model_params:{sum(p.numel() for p in base_model_p1.parameters())}")
+
+    optimizers_p1 = Optimizers(h1, base_model_p1)
+    train_loader = ShuffledSequenceLoader(h, device)
+
+    def step_fn_p1(step, lr_scale):
+        optimizers_p1.zero_grad_all()
+        train_loss = torch.zeros((), device=device)
+        for micro_step in range(h.grad_accum_steps):
+            if h.distributed:
+                model_p1.require_backward_grad_sync = micro_step == h.grad_accum_steps - 1
+            x, y = train_loader.next_batch(h.train_batch_tokens, h.grad_accum_steps)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                loss = model_p1(x, y)
+            train_loss += loss.detach()
+            (loss / h.grad_accum_steps).backward()
+        train_loss /= h.grad_accum_steps
+        frac = min(step / h.muon_momentum_warmup_steps, 1.0) if h.muon_momentum_warmup_steps > 0 else 1.0
+        muon_momentum = (1 - frac) * h.muon_momentum_warmup_start + frac * h.muon_momentum
+        for group in optimizers_p1.optimizer_muon.param_groups:
+            group["momentum"] = muon_momentum
+        for opt in optimizers_p1:
+            for group in opt.param_groups:
+                group["lr"] = group["base_lr"] * lr_scale
+        if h.grad_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(base_model_p1.parameters(), h.grad_clip_norm)
+        optimizers_p1.step()
+        return train_loss
+
+    # Warmup phase 1
+    if h.warmup_steps > 0:
+        init_state = {n: t.detach().cpu().clone() for n, t in base_model_p1.state_dict().items()}
+        init_opt = [_copy.deepcopy(opt.state_dict()) for opt in optimizers_p1]
+        model_p1.train()
+        for ws in range(h.warmup_steps):
+            step_fn_p1(ws, 1.0)
+        base_model_p1.load_state_dict(init_state, strict=True)
+        for opt, state in zip(optimizers_p1, init_opt, strict=True):
+            opt.load_state_dict(state)
+        optimizers_p1.zero_grad_all()
+        train_loader = ShuffledSequenceLoader(h, device)
+
+    training_time_ms = 0.0
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    step = 0
+    model_p1.train()
+
+    while True:
+        elapsed_ms = training_time_ms + 1e3 * (time.perf_counter() - t0)
+        if elapsed_ms >= phase1_wall_ms:
+            torch.cuda.synchronize()
+            training_time_ms += 1e3 * (time.perf_counter() - t0)
+            log(f"stack:phase1 done steps={step} time={training_time_ms:.0f}ms")
+            break
+        frac = elapsed_ms / total_wall_ms
+        warmdown_frac = h.warmdown_frac
+        if frac >= 1.0 - warmdown_frac:
+            scale = max((1.0 - frac) / warmdown_frac, h.min_lr)
+        else:
+            scale = 1.0
+        train_loss = step_fn_p1(step, scale)
+        step += 1
+        if h.train_log_every > 0 and (step <= 5 or step % h.train_log_every == 0):
+            approx_ms = training_time_ms + 1e3 * (time.perf_counter() - t0)
+            tok_s = step * h.train_batch_tokens / (approx_ms / 1e3)
+            log(f"stack:p1 {step} train_loss:{train_loss.item():.4f} time:{approx_ms/60000:.1f}m tok/s:{tok_s:.0f}")
+
+    phase1_steps = step
+    # Clean up phase 1 compiled model
+    del compiled_p1, model_p1, optimizers_p1
+    torch._dynamo.reset()
+    torch.cuda.empty_cache()
+
+    # === PHASE 2: Expand to full model ===
+    base_model = GPT(h).to(device).bfloat16()
+    restore_fp32_params(base_model)
+    stack_weights(base_model_p1, base_model, h.stack_phase1_layers, h.num_layers)
+    del base_model_p1
+    torch.cuda.empty_cache()
+
+    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+    model = DDP(compiled_model, device_ids=[h.local_rank], broadcast_buffers=False) if h.distributed else compiled_model
+    log(f"stack:phase2 model_params:{sum(p.numel() for p in base_model.parameters())}")
+
+    optimizers = Optimizers(h, base_model)
+
+    def step_fn(step, lr_scale):
+        optimizers.zero_grad_all()
+        train_loss = torch.zeros((), device=device)
+        for micro_step in range(h.grad_accum_steps):
+            if h.distributed:
+                model.require_backward_grad_sync = micro_step == h.grad_accum_steps - 1
+            x, y = train_loader.next_batch(h.train_batch_tokens, h.grad_accum_steps)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                loss = model(x, y)
+            train_loss += loss.detach()
+            (loss / h.grad_accum_steps).backward()
+        train_loss /= h.grad_accum_steps
+        frac = min(step / h.muon_momentum_warmup_steps, 1.0) if h.muon_momentum_warmup_steps > 0 else 1.0
+        muon_momentum = (1 - frac) * h.muon_momentum_warmup_start + frac * h.muon_momentum
+        for group in optimizers.optimizer_muon.param_groups:
+            group["momentum"] = muon_momentum
+        for opt in optimizers:
+            for group in opt.param_groups:
+                group["lr"] = group["base_lr"] * lr_scale
+        if h.grad_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(base_model.parameters(), h.grad_clip_norm)
+        optimizers.step()
+        return train_loss
+
+    # Brief warmup for phase 2
+    if h.warmup_steps > 0:
+        init_state = {n: t.detach().cpu().clone() for n, t in base_model.state_dict().items()}
+        init_opt = [_copy.deepcopy(opt.state_dict()) for opt in optimizers]
+        model.train()
+        warmup2 = min(h.warmup_steps, 10)
+        for ws in range(warmup2):
+            step_fn(ws, 1.0)
+        if h.num_loops > 0:
+            base_model.looping_active = True
+            for ws in range(warmup2):
+                step_fn(ws, 1.0)
+            base_model.looping_active = False
+        base_model.load_state_dict(init_state, strict=True)
+        for opt, state in zip(optimizers, init_opt, strict=True):
+            opt.load_state_dict(state)
+        optimizers.zero_grad_all()
+        if h.distributed:
+            model.require_backward_grad_sync = True
+
+    ema_state = {name: t.detach().float().clone() for name, t in base_model.state_dict().items()}
+    ema_decay = h.ema_decay
+    stop_after_step = None
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    step = 0
+    model.train()
+
+    while True:
+        last_step = stop_after_step is not None and step >= stop_after_step
+        should_validate = last_step or (h.val_loss_every > 0 and step % h.val_loss_every == 0)
+        if should_validate:
+            torch.cuda.synchronize()
+            training_time_ms += 1e3 * (time.perf_counter() - t0)
+            val_loss, val_bpb = eval_val(h, device, val_data, model)
+            log(f"stack:p2 {step} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f}")
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+        if last_step:
+            log(f"stopping_early: wallclock_cap train_time:{training_time_ms:.0f}ms phase1_steps:{phase1_steps} phase2_steps:{step}")
+            break
+        elapsed_total_ms = training_time_ms + 1e3 * (time.perf_counter() - t0)
+        frac = elapsed_total_ms / total_wall_ms
+        warmdown_frac = h.warmdown_frac
+        if frac >= 1.0 - warmdown_frac:
+            scale = max((1.0 - frac) / warmdown_frac, h.min_lr)
+        else:
+            scale = 1.0
+        if h.num_loops > 0 and not base_model.looping_active:
+            phase2_frac = (elapsed_total_ms - phase1_wall_ms) / phase2_wall_ms if phase2_wall_ms > 0 else 1.0
+            if phase2_frac >= h.enable_looping_at:
+                base_model.looping_active = True
+                log(f"stack:layer_loop:enabled step:{step} frac:{frac:.3f}")
+        train_loss = step_fn(step, scale)
+        with torch.no_grad():
+            for name, t in base_model.state_dict().items():
+                ema_state[name].mul_(ema_decay).add_(t.detach().float(), alpha=1.0 - ema_decay)
+        step += 1
+        approx_ms = training_time_ms + 1e3 * (time.perf_counter() - t0)
+        if h.train_log_every > 0 and (step <= 5 or step % h.train_log_every == 0 or stop_after_step is not None):
+            tok_s = (phase1_steps + step) * h.train_batch_tokens / (approx_ms / 1e3)
+            log(f"stack:p2 {step} train_loss:{train_loss.item():.4f} time:{approx_ms/60000:.1f}m tok/s:{tok_s:.0f}")
+        reached_cap = total_wall_ms is not None and approx_ms >= total_wall_ms
+        if h.distributed:
+            reached_cap_tensor = torch.tensor(int(reached_cap), device=device)
+            dist.all_reduce(reached_cap_tensor, op=dist.ReduceOp.MAX)
+            reached_cap = bool(reached_cap_tensor.item())
+        if stop_after_step is None and reached_cap:
+            stop_after_step = step
+
+    log(f"peak memory allocated: {torch.cuda.max_memory_allocated()//1024//1024} MiB reserved: {torch.cuda.max_memory_reserved()//1024//1024} MiB")
+    log("ema:applying EMA weights")
+    current_state = base_model.state_dict()
+    avg_state = {name: t.to(dtype=current_state[name].dtype) for name, t in ema_state.items()}
+    base_model.load_state_dict(avg_state, strict=True)
+    return base_model, compiled_model
+
+
 def train_model(h, device, val_data):
+    if h.stack_enabled:
+        return train_model_stacked(h, device, val_data)
     base_model = GPT(h).to(device).bfloat16()
     restore_fp32_params(base_model)
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
