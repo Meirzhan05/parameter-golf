@@ -73,7 +73,7 @@ class Hyperparameters:
     etlb_lr = float(os.environ.get("ETLB_LR", 0.05))
     etlb_steps = int(os.environ.get("ETLB_STEPS", 5))
     etlb_clip = float(os.environ.get("ETLB_CLIP", 3.0))
-    prog_seq_enabled = bool(int(os.environ.get("PROG_SEQ_ENABLED", "1")))
+    prog_seq_enabled = bool(int(os.environ.get("PROG_SEQ_ENABLED", "0")))
     prog_seq_start = int(os.environ.get("PROG_SEQ_START", 512))
     prog_seq_ramp_frac = float(os.environ.get("PROG_SEQ_RAMP_FRAC", 0.5))
     stack_enabled = bool(int(os.environ.get("STACK_ENABLED", "0")))
