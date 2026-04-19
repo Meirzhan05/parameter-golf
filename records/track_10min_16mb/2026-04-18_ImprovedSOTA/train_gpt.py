@@ -73,6 +73,9 @@ class Hyperparameters:
     etlb_lr = float(os.environ.get("ETLB_LR", 0.05))
     etlb_steps = int(os.environ.get("ETLB_STEPS", 5))
     etlb_clip = float(os.environ.get("ETLB_CLIP", 3.0))
+    prog_seq_enabled = bool(int(os.environ.get("PROG_SEQ_ENABLED", "1")))
+    prog_seq_start = int(os.environ.get("PROG_SEQ_START", 512))
+    prog_seq_ramp_frac = float(os.environ.get("PROG_SEQ_RAMP_FRAC", 0.5))
     stack_enabled = bool(int(os.environ.get("STACK_ENABLED", "0")))
     stack_phase1_frac = float(os.environ.get("STACK_PHASE1_FRAC", 0.25))
     stack_phase1_layers = int(os.environ.get("STACK_PHASE1_LAYERS", 6))
@@ -377,13 +380,19 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, dim, mlp_mult):
         super().__init__()
-        hidden = int(mlp_mult * dim)
-        self.fc = CastedLinear(dim, hidden, bias=False)
+        # SwiGLU: 3 matrices instead of 2, so reduce hidden dim to keep param count ~equal
+        # Original: 2 * dim * hidden = 2 * dim * (4*dim) = 8*dim^2
+        # SwiGLU:   3 * dim * hidden = 8*dim^2  =>  hidden = 8*dim/3 ≈ 2.67*dim
+        hidden = int(mlp_mult * dim * 2 / 3)
+        # Round to multiple of 64 for efficiency
+        hidden = ((hidden + 63) // 64) * 64
+        self.gate = CastedLinear(dim, hidden, bias=False)
+        self.up = CastedLinear(dim, hidden, bias=False)
         self.proj = CastedLinear(hidden, dim, bias=False)
         self.proj._zero_init = True
 
     def forward(self, x):
-        return self.proj(F.leaky_relu(self.fc(x), negative_slope=0.5).square())
+        return self.proj(F.silu(self.gate(x)) * self.up(x))
 
 
 class Block(nn.Module):
@@ -1419,7 +1428,8 @@ def train_model(h, device, val_data):
         return train_model_stacked(h, device, val_data)
     base_model = GPT(h).to(device).bfloat16()
     restore_fp32_params(base_model)
-    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+    use_dynamic = h.prog_seq_enabled
+    compiled_model = torch.compile(base_model, dynamic=use_dynamic, fullgraph=not use_dynamic)
     if h.distributed:
         model = DDP(compiled_model, device_ids=[h.local_rank], broadcast_buffers=False)
     else:
@@ -1444,13 +1454,28 @@ def train_model(h, device, val_data):
             return max((1.0 - frac) / h.warmdown_frac, h.min_lr)
         return 1.0
 
-    def step_fn(step, lr_scale):
+    def get_seq_len(frac):
+        """Progressive sequence length: log-linear ramp from prog_seq_start to train_seq_len."""
+        if not h.prog_seq_enabled or frac >= h.prog_seq_ramp_frac:
+            return h.train_seq_len
+        ramp_progress = frac / h.prog_seq_ramp_frac
+        log_start = math.log2(h.prog_seq_start)
+        log_end = math.log2(h.train_seq_len)
+        cur_log = log_start + ramp_progress * (log_end - log_start)
+        sl = int(2 ** cur_log)
+        sl = max(h.prog_seq_start, min(h.train_seq_len, ((sl + 63) // 64) * 64))
+        return sl
+
+    def step_fn(step, lr_scale, seq_len=None):
         optimizers.zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(h.grad_accum_steps):
             if h.distributed:
                 model.require_backward_grad_sync = micro_step == h.grad_accum_steps - 1
             x, y = train_loader.next_batch(h.train_batch_tokens, h.grad_accum_steps)
+            if seq_len is not None and seq_len < h.train_seq_len:
+                x = x[:, :seq_len]
+                y = y[:, :seq_len]
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 loss = model(x, y)
             train_loss += loss.detach()
@@ -1517,12 +1542,13 @@ def train_model(h, device, val_data):
         elapsed_ms = training_time_ms + 1e3 * (time.perf_counter() - t0)
         frac = training_frac(step, elapsed_ms)
         scale = lr_mul(frac)
+        cur_seq_len = get_seq_len(frac)
         if h.num_loops > 0 and not base_model.looping_active and frac >= h.enable_looping_at:
             base_model.looping_active = True
             log(
                 f"layer_loop:enabled step:{step} frac:{frac:.3f} encoder:{base_model.encoder_indices} decoder:{base_model.decoder_indices}"
             )
-        train_loss = step_fn(step, scale)
+        train_loss = step_fn(step, scale, seq_len=cur_seq_len)
         with torch.no_grad():
             for name, t in base_model.state_dict().items():
                 ema_state[name].mul_(ema_decay).add_(t.detach().float(), alpha=1.0 - ema_decay)
