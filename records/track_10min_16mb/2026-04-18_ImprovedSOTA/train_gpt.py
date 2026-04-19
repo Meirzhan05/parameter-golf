@@ -38,7 +38,7 @@ class Hyperparameters:
     ln_scale = bool(int(os.environ.get("LN_SCALE", "1")))
     qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 5.25))
     num_loops = int(os.environ.get("NUM_LOOPS", 2))
-    loop_start = int(os.environ.get("LOOP_START", 3))
+    loop_start = int(os.environ.get("LOOP_START", 2))
     loop_end = int(os.environ.get("LOOP_END", 5))
     enable_looping_at = float(os.environ.get("ENABLE_LOOPING_AT", 0.35))
     parallel_residual_start = int(os.environ.get("PARALLEL_RESIDUAL_START", 7))
