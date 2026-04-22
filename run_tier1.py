@@ -81,10 +81,10 @@ _sota_code = _sota_code.replace(
     '''log("  {}: {}".format(cat, ", ".join(sorted(categories[cat]))))'''
 )
 
-# Line 440: .glob("fineweb_train_*.bin") inside f-string
+# Line 440: .glob("fineweb_train_*.bin") inside f-string — just swap the inner quotes
 _sota_code = _sota_code.replace(
-    '''.glob("fineweb_train_*.bin"))}''',
-    """.glob('fineweb_train_*.bin'))}"""
+    '.glob("fineweb_train_*.bin")',
+    ".glob('fineweb_train_*.bin')"
 )
 
 # Execute the SOTA code in our module namespace so we get all definitions
