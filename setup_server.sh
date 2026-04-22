@@ -17,10 +17,18 @@ echo "============================================"
 echo ""
 echo "[1/5] Installing Python packages..."
 pip install brotli sentencepiece huggingface_hub
-pip install flash_attn_3 --no-deps --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch291/ 2>/dev/null || echo "WARNING: flash_attn_3 install failed, trying alternate..."
 
-# Check flash attention
-python3 -c "from flash_attn_interface import flash_attn_func as f; print('flash_attn_3: OK')" 2>/dev/null || echo "WARNING: flash_attn_3 not available, may need manual install"
+# Upgrade PyTorch to 2.9.1+cu128 (required for Flash Attention 3)
+echo "Upgrading PyTorch to 2.9.1+cu128..."
+pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
+
+# Install Flash Attention 3 (must match PyTorch 2.9.1+cu128)
+echo "Installing Flash Attention 3..."
+pip install flash_attn_3 --no-deps --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch291/ 2>/dev/null || echo "WARNING: flash_attn_3 pre-built wheel failed, trying pip install..."
+pip install flash-attn --no-build-isolation 2>/dev/null || true
+
+# Verify flash attention
+python3 -c "from flash_attn_interface import flash_attn_func as f; print('flash_attn_3: OK')" || { echo "ERROR: flash_attn_3 not available!"; exit 1; }
 
 # Step 2: Clone repo and checkout branch
 echo ""
