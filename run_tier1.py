@@ -71,6 +71,15 @@ _decoded = _L.decompress(
 )
 _sota_code = _decoded.decode('utf-8')
 
+# Patch Python 3.12+ nested-quote f-strings for Python 3.11 compatibility.
+# The SOTA code has: f"  {cat}: {", ".join(...)}"
+# which uses " inside a "-delimited f-string (PEP 701, Python 3.12+).
+# Replace the specific problematic f-string pattern with .format() equivalent
+_sota_code = _sota_code.replace(
+    '''log(f"  {cat}: {", ".join(sorted(categories[cat]))}")''',
+    '''log("  {}: {}".format(cat, ", ".join(sorted(categories[cat]))))'''
+)
+
 # Execute the SOTA code in our module namespace so we get all definitions
 # (GPT, Hyperparameters, train_model, serialize, eval_val, etc.)
 exec(compile(_sota_code, SOTA_PATH, 'exec'), globals())
