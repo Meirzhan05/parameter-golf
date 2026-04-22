@@ -72,12 +72,19 @@ _decoded = _L.decompress(
 _sota_code = _decoded.decode('utf-8')
 
 # Patch Python 3.12+ nested-quote f-strings for Python 3.11 compatibility.
-# The SOTA code has: f"  {cat}: {", ".join(...)}"
-# which uses " inside a "-delimited f-string (PEP 701, Python 3.12+).
-# Replace the specific problematic f-string pattern with .format() equivalent
+# PEP 701 allows reusing the same quote type inside f-string braces, but
+# Python 3.11 does not support this. Fix all instances.
+
+# Line 266: log(f"  {cat}: {", ".join(sorted(categories[cat]))}")
 _sota_code = _sota_code.replace(
     '''log(f"  {cat}: {", ".join(sorted(categories[cat]))}")''',
     '''log("  {}: {}".format(cat, ", ".join(sorted(categories[cat]))))'''
+)
+
+# Line 440: .glob("fineweb_train_*.bin") inside f-string
+_sota_code = _sota_code.replace(
+    '''.glob("fineweb_train_*.bin"))}''',
+    """.glob('fineweb_train_*.bin'))}"""
 )
 
 # Execute the SOTA code in our module namespace so we get all definitions
