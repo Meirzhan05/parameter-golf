@@ -87,6 +87,14 @@ _sota_code = _sota_code.replace(
     ".glob('fineweb_train_*.bin')"
 )
 
+# Remove the if __name__=='__main__':main() block so exec only defines
+# functions/classes without running main(). We call main() ourselves
+# AFTER patching train_and_eval.
+_sota_code = _sota_code.replace(
+    "if __name__=='__main__':main()",
+    "# __main__ block removed by run_tier1.py"
+)
+
 # Execute the SOTA code in our module namespace so we get all definitions
 # (GPT, Hyperparameters, train_model, serialize, eval_val, etc.)
 exec(compile(_sota_code, SOTA_PATH, 'exec'), globals())
