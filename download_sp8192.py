@@ -19,9 +19,13 @@ DATASETS_DIR = ROOT / "datasets" / "fineweb10B_sp8192"
 TOKENIZERS_DIR = ROOT / "tokenizers"
 
 def download(repo_path, local_path):
-    if local_path.exists() or local_path.is_symlink():
+    # Check if file already exists and is valid (not a broken symlink)
+    if local_path.exists():
         print(f"  exists: {local_path}")
         return
+    # Remove broken symlinks or stale entries
+    if local_path.is_symlink():
+        local_path.unlink()
     local_path.parent.mkdir(parents=True, exist_ok=True)
     parts = repo_path.rsplit("/", 1)
     subfolder = parts[0] if len(parts) > 1 else None
