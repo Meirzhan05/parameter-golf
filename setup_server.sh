@@ -22,10 +22,10 @@ pip install brotli sentencepiece huggingface_hub
 echo "Upgrading PyTorch to 2.9.1+cu128..."
 pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
 
-# Install Flash Attention 3 (must match PyTorch 2.9.1+cu128)
+# Install Flash Attention 3 pre-built wheel (must match PyTorch 2.9.1+cu128)
+# Do NOT install flash-attn v2 (compiles from source, takes 30 min, not needed)
 echo "Installing Flash Attention 3..."
-pip install flash_attn_3 --no-deps --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch291/ 2>/dev/null || echo "WARNING: flash_attn_3 pre-built wheel failed, trying pip install..."
-pip install flash-attn --no-build-isolation 2>/dev/null || true
+pip install flash_attn_3 --no-deps --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch291/
 
 # Verify flash attention
 python3 -c "from flash_attn_interface import flash_attn_func as f; print('flash_attn_3: OK')" || { echo "ERROR: flash_attn_3 not available!"; exit 1; }
