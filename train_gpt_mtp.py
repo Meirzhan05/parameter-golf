@@ -99,11 +99,11 @@ class CausalSelfAttention(nn.Module):
 	def _xsa_efficient(self,y,v):B,T,H,D=y.shape;Hkv=v.size(-2);group=H//Hkv;y_g=y.reshape(B,T,Hkv,group,D);vn=F.normalize(v,dim=-1).unsqueeze(-2);proj=(y_g*vn).sum(dim=-1,keepdim=True)*vn;return(y_g-proj).reshape(B,T,H,D)
 	def forward(self,x,lora=None):
 		bsz,seqlen,dim=x.shape;q=self.c_q(x);k=self.c_k(x);v=self.c_v(x)
-		if lora is not None:q=q+(x@lora.q_A)@lora.q_B;k=k+(x@lora.k_A)@lora.k_B;v=v+(x@lora.v_A)@lora.v_B
+		if lora is not None:dt=x.dtype;q=q+(x@lora.q_A.to(dt))@lora.q_B.to(dt);k=k+(x@lora.k_A.to(dt))@lora.k_B.to(dt);v=v+(x@lora.v_A.to(dt))@lora.v_B.to(dt)
 		q=q.reshape(bsz,seqlen,self.num_heads,self.head_dim);k=k.reshape(bsz,seqlen,self.num_kv_heads,self.head_dim);v=v.reshape(bsz,seqlen,self.num_kv_heads,self.head_dim);q=F.rms_norm(q,(q.size(-1),));k=F.rms_norm(k,(k.size(-1),));cos,sin=self.rotary(seqlen,x.device,q.dtype);q=apply_rotary_emb(q,cos,sin,self.rope_dims);k=apply_rotary_emb(k,cos,sin,self.rope_dims);q=q*self.q_gain.to(dtype=q.dtype)[None,None,:,None];y=flash_attn_3_func(q,k,v,causal=True)
 		if self.use_xsa:y=self._xsa_efficient(y,v)
 		y=y.reshape(bsz,seqlen,dim);out=self.proj(y)
-		if lora is not None:out=out+(y@lora.proj_A)@lora.proj_B
+		if lora is not None:dt=y.dtype;out=out+(y@lora.proj_A.to(dt))@lora.proj_B.to(dt)
 		return out
 class AttentionLoRA(nn.Module):
 	def __init__(self,dim,kv_dim,rank):
