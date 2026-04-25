@@ -39,7 +39,7 @@ if [ ! -d "parameter-golf" ]; then
 fi
 cd parameter-golf
 git fetch origin
-git checkout research/beat-sota-pipeline
+git checkout feature/mtp
 git pull
 
 # Step 3: Download SP8192 dataset
@@ -83,5 +83,5 @@ echo "============================================"
 echo "Setup complete! Run training with:"
 echo ""
 echo "cd /workspace/parameter-golf"
-echo "PREQUANT_TTT_ENABLED=1 PREQUANT_TTT_OPTIMIZER=adamw PREQUANT_TTT_LR=1e-3 PREQUANT_TTT_EPOCHS=5 TTT_ENABLED=1 torchrun --nproc_per_node=8 run_tier1.py"
+echo "torchrun --nproc_per_node=8 train_gpt_improved_compressed.py"
 echo "============================================"
