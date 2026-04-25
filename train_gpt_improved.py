@@ -383,7 +383,7 @@ def collect_hessians(model,train_loader,h,device,n_calibration_batches=64):
 			return hook_fn
 		hooks.append(hook_module.register_forward_hook(make_output_hook('tok_emb.weight')))
 	model.eval()
-	with torch.no_grad():
+	with torch.no_grad(),torch.autocast(device_type='cuda',dtype=torch.bfloat16,enabled=True):
 		for _ in range(n_calibration_batches):x,_=train_loader.next_batch(h.train_batch_tokens,h.grad_accum_steps);model.forward_logits(x)
 	for hook in hooks:hook.remove()
 	for name in hessians:hessians[name]=hessians[name].cpu()/n_calibration_batches
