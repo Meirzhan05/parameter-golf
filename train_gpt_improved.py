@@ -403,33 +403,27 @@ def quantize_int6_per_row(W,clip_range=31):
 		return best_q,best_s
 	amax=t32.abs().max().item();scale=torch.tensor(amax/clip_range if amax>0 else 1.0,dtype=torch.float16)
 	q=torch.clamp(torch.round(t32/scale.float()),-clip_range,clip_range).to(torch.int8);return q,scale
-def gptq_quantize_weight(w,H,clip_range=63,block_size=128,percdamp=0.01):
-	"""GPTQ with percentile scale search, actorder, and Cholesky fallback."""
-	W_orig=w.float().clone();rows,cols=W_orig.shape;H=H.float().clone();dead=torch.diag(H)==0;H[dead,dead]=1;damp=percdamp*H.diag().mean();H.diagonal().add_(damp);perm=torch.argsort(H.diag(),descending=True);invperm=torch.argsort(perm);W_perm=W_orig[:,perm].clone();W_perm[:,dead[perm]]=0;H=H[perm][:,perm]
+def gptq_quantize_weight(w,H,clip_sigmas=3.,clip_range=63,block_size=128):
+	"""GPTQ with SD-based clipping, actorder, and Cholesky fallback."""
+	W_orig=w.float().clone();rows,cols=W_orig.shape;H=H.float().clone();dead=torch.diag(H)==0;H[dead,dead]=1;damp=.01*H.diag().mean();H.diagonal().add_(damp);perm=torch.argsort(H.diag(),descending=True);invperm=torch.argsort(perm);W_perm=W_orig[:,perm].clone();W_perm[:,dead[perm]]=0;H=H[perm][:,perm]
 	try:
 		Hinv=torch.cholesky_inverse(torch.linalg.cholesky(H));Hinv=torch.linalg.cholesky(Hinv,upper=True)
 	except torch.linalg.LinAlgError:
 		return quantize_int6_per_row(W_orig,clip_range)
-	best_q,best_scale,best_err=None,None,float('inf')
-	for pct in[0.9990,0.9995,0.9999,0.99999,1.0]:
-		if pct<1.0:row_clip=torch.quantile(W_orig.abs(),pct,dim=1)
-		else:row_clip=W_orig.abs().amax(dim=1)
-		s=(row_clip/clip_range).clamp_min(1.0/clip_range).to(torch.float16);sf=s.float()
-		Q=torch.zeros(rows,cols,dtype=torch.int8);W_work=W_perm.clone()
-		for i1 in range(0,cols,block_size):
-			i2=min(i1+block_size,cols);W_block=W_work[:,i1:i2].clone();Hinv_block=Hinv[i1:i2,i1:i2];Err=torch.zeros(rows,i2-i1)
-			for j in range(i2-i1):w_col=W_block[:,j];d=Hinv_block[j,j];q_col=torch.clamp(torch.round(w_col/sf),-clip_range,clip_range);Q[:,i1+j]=q_col.to(torch.int8);err=(w_col-q_col.float()*sf)/d;Err[:,j]=err;W_block[:,j:]-=err.unsqueeze(1)*Hinv_block[j,j:].unsqueeze(0)
-			if i2<cols:W_work[:,i2:]-=Err@Hinv[i1:i2,i2:]
-		recon=Q.float()*sf[:,None];mse=(W_perm-recon).pow(2).mean().item()
-		if mse<best_err:best_q,best_scale,best_err=Q,s,mse
-	best_q=best_q[:,invperm]
-	return best_q,best_scale
+	row_std=W_orig.std(dim=1);s=(clip_sigmas*row_std/clip_range).clamp_min(1e-10).to(torch.float16);sf=s.float()
+	Q=torch.zeros(rows,cols,dtype=torch.int8);W_work=W_perm.clone()
+	for i1 in range(0,cols,block_size):
+		i2=min(i1+block_size,cols);W_block=W_work[:,i1:i2].clone();Hinv_block=Hinv[i1:i2,i1:i2];Err=torch.zeros(rows,i2-i1)
+		for j in range(i2-i1):w_col=W_block[:,j];d=Hinv_block[j,j];q_col=torch.clamp(torch.round(w_col/sf),-clip_range,clip_range);Q[:,i1+j]=q_col.to(torch.int8);err=(w_col-q_col.float()*sf)/d;Err[:,j]=err;W_block[:,j:]-=err.unsqueeze(1)*Hinv_block[j,j:].unsqueeze(0)
+		if i2<cols:W_work[:,i2:]-=Err@Hinv[i1:i2,i2:]
+	Q=Q[:,invperm]
+	return Q,s
 def gptq_mixed_quantize(state_dict,hessians,h):
 	result={};meta={}
 	for(name,tensor)in state_dict.items():
 		t=tensor.detach().cpu().contiguous()
 		if not t.is_floating_point()or t.numel()<=65536:result[name]=t.to(torch.float16)if t.is_floating_point()else t;meta[name]='passthrough (float16)';continue
-		cs=h.embed_clip_sigmas if'tok_emb'in name else h.matrix_clip_sigmas;bits=h.embed_bits if'tok_emb'in name else h.matrix_bits;q,s=gptq_quantize_weight(t,hessians[name],clip_range=2**(bits-1)-1);result[name+'.q']=q;result[name+'.scale']=s;meta[name]=f"gptq (int{bits})"
+		cs=h.embed_clip_sigmas if'tok_emb'in name else h.matrix_clip_sigmas;bits=h.embed_bits if'tok_emb'in name else h.matrix_bits;q,s=gptq_quantize_weight(t,hessians[name],clip_sigmas=cs,clip_range=2**(bits-1)-1);result[name+'.q']=q;result[name+'.scale']=s;meta[name]=f"gptq (int{bits})"
 	categories=collections.defaultdict(set)
 	for(name,cat)in meta.items():short=re.sub('\\.\\d+$','',re.sub('blocks\\.\\d+','blocks',name));categories[cat].add(short)
 	log('Quantized weights:')
