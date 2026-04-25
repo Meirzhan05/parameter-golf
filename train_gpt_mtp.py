@@ -279,8 +279,7 @@ class Optimizers:
 		self.zero_grad_all()
 def restore_fp32_params(model):
 	for module in model.modules():
-		if isinstance(module,CastedLinear):module.float()
-		if isinstance(module,AttentionLoRA):module.float()
+		if isinstance(module,(CastedLinear,AttentionLoRA)):module.float()
 	for(name,param)in model.named_parameters():
 		if(param.ndim<2 or any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS))and param.dtype!=torch.float32:param.data=param.data.float()
 def collect_hessians(model,train_loader,h,device,n_calibration_batches=64):
