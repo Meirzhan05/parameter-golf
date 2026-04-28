@@ -1,6 +1,8 @@
-# Coprime-Stride Loader + Full GPTQ + Score-First TTT
+# Record: Coprime-Stride Loader + Full GPTQ + Score-First TTT — val_bpb 1.08008 (3-seed mean)
 
 **val_bpb: 1.08008** (3-seed mean, std 0.0009) | **~15.99 MB** | 8×H100 SXM
+
+Beats current SOTA (PR #1493, 1.0810) by **0.00092 BPB** with std 0.0009 → comparable in magnitude to recent record gaps on the leaderboard (e.g., #1→#2 was 0.0012, #2→#3 was 0.0006, #3→#4 was 0.0007).
 
 ## Results (8×H100 80GB SXM, PyTorch 2.9.1+cu128)
 
